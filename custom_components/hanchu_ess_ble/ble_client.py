@@ -26,6 +26,7 @@ from .protocol import (
     HanchuReplyAssembler,
     build_handshake_command,
     build_read_request,
+    build_write_request,
     decrypt_message,
     derive_session_key,
     encrypt_message,
@@ -101,6 +102,18 @@ class HanchuBleSession:
             return payload
         return encrypt_message(payload, self._secret_key)
 
+    def encode_write_request(
+        self,
+        values: dict[str, object],
+        *,
+        encrypt: bool = True,
+    ) -> bytes:
+        """Encode a JSON write request, encrypting it when requested."""
+        payload = build_write_request(values)
+        if not encrypt:
+            return payload
+        return encrypt_message(payload, self._secret_key)
+
     def decode_notification(self, payload: bytes, *, encrypted: bool = True) -> HanchuReply | None:
         """Decode a notification payload into a structured reply when complete."""
         packet = decrypt_message(payload, self._secret_key) if encrypted else payload
@@ -169,6 +182,66 @@ class HanchuBleClient:
                 "Completed Hanchu BLE read address=%s tid=%s values=%s",
                 self.address,
                 reply.tid,
+                reply.as_dict(),
+            )
+            return reply
+        finally:
+            await self._async_stop_notify(client)
+            await client.disconnect()
+            _LOGGER.debug("Disconnected from Hanchu inverter address=%s", self.address)
+
+    async def async_write_values(
+        self,
+        values: dict[str, object],
+        *,
+        encrypted: bool = True,
+    ) -> HanchuReply:
+        """Connect to the inverter, write values, then disconnect."""
+        _LOGGER.debug(
+            "Starting Hanchu BLE write address=%s values=%s encrypted=%s",
+            self.address,
+            values,
+            encrypted,
+        )
+        ble_device = bluetooth.async_ble_device_from_address(
+            self.hass,
+            self.address,
+            connectable=True,
+        )
+        if ble_device is None:
+            raise BleakError(f"No connectable BLE device found for {self.address}")
+
+        self._session.reset()
+        self._drain_notifications()
+        client = await establish_connection(
+            BleakClientWithServiceCache,
+            ble_device,
+            self.name,
+            max_attempts=3,
+        )
+        try:
+            _LOGGER.debug("Connected to Hanchu inverter address=%s", self.address)
+            await self._async_start_notify(client)
+            if encrypted:
+                await self._async_perform_handshake(client)
+
+            payload = self._session.encode_write_request(values, encrypt=encrypted)
+            _LOGGER.debug(
+                "Writing Hanchu write request address=%s payload=%s",
+                self.address,
+                payload.hex(),
+            )
+            await client.write_gatt_char(
+                BLE_WRITE_CHARACTERISTIC_UUID,
+                payload,
+                response=False,
+            )
+            reply = await self._async_wait_for_reply(encrypted=encrypted)
+            _LOGGER.debug(
+                "Completed Hanchu BLE write address=%s tid=%s code=%s values=%s",
+                self.address,
+                reply.tid,
+                reply.code,
                 reply.as_dict(),
             )
             return reply

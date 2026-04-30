@@ -13,12 +13,12 @@ What it can do today:
 - Connect locally over BLE
 - Poll a set of inverter registers
 - Expose core battery, PV, grid, EPS, and diagnostic sensors
+- Set supported inverter power, SoC, and schedule values
 
 What is not implemented yet:
 - Battery device support as separate BLE devices
 - Full register coverage
 - Full scaling/units verification for every sensor
-- Write/configuration commands
 
 ## Supported Device Discovery
 
@@ -79,6 +79,18 @@ Examples of currently exposed sensors:
 
 Some sensors are disabled by default.
 
+## Settings
+
+The integration exposes writable controls for:
+- Maximum charging and discharging power
+- Grid-to-battery maximum SoC
+- Maximum charge SoC
+- On-grid and off-grid battery discharge minimum SoC
+- Three charge windows and three discharge windows
+- Enable controls for each charge and discharge window
+
+Charge and discharge schedule time entities are disabled by default.
+
 ## Notes
 
 - The integration uses local BLE only
@@ -122,4 +134,3 @@ Useful contributions include:
 ## Disclaimer
 
 This is an unofficial community integration and is not affiliated with or endorsed by Hanchu.
-

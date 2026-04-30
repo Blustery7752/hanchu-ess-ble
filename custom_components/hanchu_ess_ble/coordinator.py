@@ -11,7 +11,7 @@ from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth import BluetoothChange, BluetoothServiceInfoBleak
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .ble_client import HanchuBleClient, HanchuBleSnapshot, snapshot_from_service_info
@@ -22,6 +22,7 @@ from .const import (
     DEFAULT_POLL_KEYS,
     DOMAIN,
     SCAN_INTERVAL,
+    WRITABLE_SETTING_KEYS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -53,6 +54,7 @@ class HanchuBleCoordinator(DataUpdateCoordinator[HanchuCoordinatorData]):
         self.address: str = entry.data[CONF_ADDRESS]
         self.configured_name: str = entry.data.get(CONF_DEVICE_NAME, DEFAULT_NAME)
         self.poll_keys = list(DEFAULT_POLL_KEYS)
+        self.setting_keys = list(WRITABLE_SETTING_KEYS)
         self.client = HanchuBleClient(hass, self.address, self.configured_name)
         self._unsubscribe_bluetooth: CALLBACK_TYPE | None = None
         self._unsubscribe_unavailable: CALLBACK_TYPE | None = None
@@ -92,6 +94,48 @@ class HanchuBleCoordinator(DataUpdateCoordinator[HanchuCoordinatorData]):
             self._unsubscribe_unavailable()
             self._unsubscribe_unavailable = None
 
+    async def async_write_value(self, key: str, value: object) -> None:
+        """Write a single inverter value and update coordinator state."""
+        await self.async_write_values({key: value})
+
+    async def async_write_values(self, values: dict[str, object]) -> None:
+        """Write inverter values and update coordinator state."""
+        if self.data is None:
+            raise HomeAssistantError(
+                "Cannot write inverter value before coordinator data exists"
+            )
+
+        try:
+            reply = await self.client.async_write_values(values, encrypted=True)
+        except Exception as err:
+            _LOGGER.debug(
+                "Failed Hanchu value write for address=%s values=%s",
+                self.address,
+                values,
+                exc_info=True,
+            )
+            raise HomeAssistantError(f"Failed to write inverter values: {err}") from err
+
+        reply_values = reply.as_dict()
+        updated_values = dict(self.data.values or {})
+        for key, value in values.items():
+            updated_values[key] = reply_values.get(key, value)
+
+        self.async_set_updated_data(
+            HanchuCoordinatorData(
+                address=self.data.address,
+                configured_name=self.data.configured_name,
+                discovered_name=self.data.discovered_name,
+                connectable=self.data.connectable,
+                rssi=self.data.rssi,
+                last_seen=self.data.last_seen,
+                is_present=self.data.is_present,
+                manufacturer_data=self.data.manufacturer_data,
+                service_data=self.data.service_data,
+                values=updated_values,
+            )
+        )
+
     async def _async_update_data(self) -> HanchuCoordinatorData:
         """Fetch the latest Bluetooth information for the configured inverter."""
         _LOGGER.debug("Refreshing Hanchu coordinator for address=%s", self.address)
@@ -130,15 +174,39 @@ class HanchuBleCoordinator(DataUpdateCoordinator[HanchuCoordinatorData]):
             )
             raise UpdateFailed(f"Failed to read inverter values: {err}") from err
 
+        values = reply.as_dict()
+        if self.setting_keys:
+            try:
+                setting_reply = await self.client.async_read_values(
+                    self.setting_keys,
+                    encrypted=True,
+                )
+            except Exception:
+                _LOGGER.debug(
+                    "Failed optional Hanchu settings refresh for address=%s",
+                    self.address,
+                    exc_info=True,
+                )
+                if self.data and self.data.values:
+                    values.update(
+                        {
+                            key: self.data.values[key]
+                            for key in self.setting_keys
+                            if key in self.data.values
+                        }
+                    )
+            else:
+                values.update(setting_reply.as_dict())
+
         _LOGGER.debug(
             "Hanchu coordinator refresh succeeded for address=%s values=%s",
             self.address,
-            reply.as_dict(),
+            values,
         )
         return self._build_data(
             snapshot,
             is_present=True,
-            values=reply.as_dict(),
+            values=values,
         )
 
     @callback

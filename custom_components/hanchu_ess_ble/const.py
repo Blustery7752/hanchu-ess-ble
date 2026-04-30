@@ -13,7 +13,12 @@ CONF_DISCOVERED_ADDRESS = "discovered_address"
 DEFAULT_NAME = "Hanchu ESS"
 DEFAULT_SCAN_INTERVAL_SECONDS = 30
 
-PLATFORMS: list[Platform] = [Platform.SENSOR]
+PLATFORMS: list[Platform] = [
+    Platform.NUMBER,
+    Platform.SENSOR,
+    Platform.SWITCH,
+    Platform.TIME,
+]
 SCAN_INTERVAL = timedelta(seconds=DEFAULT_SCAN_INTERVAL_SECONDS)
 
 MANUFACTURER = "Hanchu"
@@ -60,6 +65,27 @@ DEFAULT_POLL_KEYS: tuple[str, ...] = (
     "P085",
     "P139",
     "L034",
+)
+
+WRITABLE_SETTING_KEYS: tuple[str, ...] = (
+    "L005",
+    "L006",
+    "L007",
+    "L008",
+    "L009",
+    "L010",
+    "L011",
+    "L012",
+    "L013",
+    "L014",
+    "L015",
+    "L016",
+    "L017",
+    "L018",
+    "L074",
+    "P647",
+    "P648",
+    "P772",
 )
 
 INVERTER_NAME_PREFIXES: tuple[str, ...] = (
