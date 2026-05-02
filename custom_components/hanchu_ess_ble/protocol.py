@@ -137,6 +137,22 @@ class HanchuProtocol:
         except Exception as err:
             _LOGGER.error("AES decrypt error: %s", err)
             return None
+        
+        def encrypt(self, plaintext: bytes) -> Optional[bytes]:
+            """Encrypt JSON write frame using AES‑128‑CFB8."""
+            if not self._dynamic_key:
+                _LOGGER.error("No dynamic key set; random fix packet not sent yet")
+                return None
+
+            iv = self.BASE_IV.encode("utf-8")[:16]
+            cipher = Cipher(algorithms.AES(self._dynamic_key), modes.CFB8(iv))
+            encryptor = cipher.encryptor()
+            try:
+                return encryptor.update(plaintext) + encryptor.finalize()
+            except Exception as err:
+                _LOGGER.error("AES encrypt error: %s", err)
+                return None
+    
 
     # ------------------------------------------------------------------ #
     # Public entrypoint: encrypted bytes → friendly telemetry

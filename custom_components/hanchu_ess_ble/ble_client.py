@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from datetime import time
-from typing import Optional, Callable, Dict, Any
+from typing import Any, Callable, Dict, Optional
 
 from bleak import BleakClient
 
@@ -11,13 +11,14 @@ from .protocol import HanchuProtocol
 from .const import (
     BLE_NOTIFY_CHAR_UUID,
     BLE_WRITE_CHAR_UUID,
+    WORK_MODE_MAP,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class HanchuBleClient:
-    """Handles BLE connection + AES handshake + read/write for Hanchu inverter."""
+    """Handles BLE connection, AES handshake, notifications, and write commands."""
 
     def __init__(self, hass, entry, address: str):
         self.hass = hass
@@ -35,7 +36,7 @@ class HanchuBleClient:
     # ------------------------------------------------------------------ #
 
     async def connect(self) -> None:
-        """Ensure BLE connection is established and key exchange done."""
+        """Ensure BLE connection is established and AES key exchange done."""
         if self._client and self._client.is_connected:
             return
 
@@ -93,10 +94,10 @@ class HanchuBleClient:
     # ------------------------------------------------------------------ #
 
     async def _write(self, frame: bytes) -> None:
-        """Write a raw frame to the inverter."""
+        """Write a raw encrypted frame to the inverter."""
         async with self._lock:
             await self.connect()
-            _LOGGER.debug("Writing frame: %s", frame.hex())
+            _LOGGER.debug("Writing encrypted frame: %s", frame.hex())
             await self._client.write_gatt_char(
                 BLE_WRITE_CHAR_UUID,
                 frame,
@@ -104,44 +105,89 @@ class HanchuBleClient:
             )
 
     # ------------------------------------------------------------------ #
-    # High-level operations (called by services + number/select entities)
+    # JSON write frame builder
+    # ------------------------------------------------------------------ #
+
+    def _build_write_frame(self, code: str, value: Any) -> bytes:
+        """Build a JSON write frame and encrypt it."""
+        payload = {
+            "tid": "10001",
+            "act": "2",  # write
+            "data": [{"k": code, "v": value}],
+        }
+
+        json_str = json.dumps(payload, separators=(",", ":"))
+        json_bytes = json_str.encode("utf-8")
+
+        encrypted = self._protocol.encrypt(json_bytes)
+        if encrypted is None:
+            raise RuntimeError("AES encryption failed")
+
+        return encrypted
+
+    async def _write_param(self, code: str, value: Any) -> None:
+        """Encrypt and send a write frame."""
+        frame = self._build_write_frame(code, value)
+        await self._write(frame)
+
+    # ------------------------------------------------------------------ #
+    # High-level write operations
     # ------------------------------------------------------------------ #
 
     async def async_set_work_mode(self, mode: str) -> None:
-        """Set inverter work mode (you'll implement frame build later)."""
-        # Placeholder: build JSON command and encrypt via protocol if you want symmetry
-        _LOGGER.debug("Requested work mode change to %s (not yet implemented)", mode)
+        """Set inverter work mode (P651)."""
+        value = WORK_MODE_MAP[mode]
+        await self._write_param("P651", value)
 
-    async def async_set_charge_window(
-        self,
-        window: str,
-        start_time: time,
-        end_time: time,
-        enabled: bool,
-    ) -> None:
-        """Set a charge window (period_1 / period_2 / period_3)."""
-        _LOGGER.debug(
-            "Requested charge window %s %s-%s enabled=%s (write path TBD)",
-            window,
-            start_time,
-            end_time,
-            enabled,
-        )
+    async def async_set_charge_power_limit(self, watts: int) -> None:
+        await self._write_param("L017", watts)
 
-    async def async_set_min_soc(self, value: int) -> None:
-        _LOGGER.debug("Requested min SOC set to %s (write path TBD)", value)
+    async def async_set_discharge_power_limit(self, watts: int) -> None:
+        await self._write_param("L018", watts)
 
-    async def async_set_max_soc(self, value: int) -> None:
-        _LOGGER.debug("Requested max SOC set to %s (write path TBD)", value)
+    async def async_set_max_soc(self, percent: int) -> None:
+        await self._write_param("L074", percent)
 
-    async def async_set_grid_charge_limit(self, value: int) -> None:
-        _LOGGER.debug("Requested grid charge limit set to %s (write path TBD)", value)
+    async def async_set_charge_to_soc(self, percent: int) -> None:
+        await self._write_param("P647", percent)
+
+    async def async_set_discharge_to_soc(self, percent: int) -> None:
+        await self._write_param("P648", percent)
+
+    async def async_set_min_soc(self, percent: int) -> None:
+        await self._write_param("P772", percent)
+
+    async def async_set_meter_type(self, code: int) -> None:
+        await self._write_param("L034", code)
+
+    async def async_set_battery_preheat_auto(self, flag: int) -> None:
+        await self._write_param("L108", flag)
+
+    async def async_set_battery_preheat_manual(self, flag: int) -> None:
+        await self._write_param("L114", flag)
 
     # ------------------------------------------------------------------ #
-    # Polling (optional)
+    # Charge/discharge window setters (optional)
     # ------------------------------------------------------------------ #
 
-    async def async_poll(self) -> None:
-        """If the inverter requires explicit polling, implement here."""
-        # For now, the device is notification-driven via JSON commands from elsewhere.
-        pass
+    async def async_set_charge_window(self, window: str, start: int, end: int) -> None:
+        """Set a charge window (seconds after midnight)."""
+        mapping = {
+            "period_1": ("L005", "L006"),
+            "period_2": ("L007", "L008"),
+            "period_3": ("L009", "L010"),
+        }
+        start_code, end_code = mapping[window]
+        await self._write_param(start_code, start)
+        await self._write_param(end_code, end)
+
+    async def async_set_discharge_window(self, window: str, start: int, end: int) -> None:
+        """Set a discharge window (seconds after midnight)."""
+        mapping = {
+            "period_1": ("L011", "L012"),
+            "period_2": ("L013", "L014"),
+            "period_3": ("L015", "L016"),
+        }
+        start_code, end_code = mapping[window]
+        await self._write_param(start_code, start)
+        await self._write_param(end_code, end)
