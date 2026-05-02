@@ -12,9 +12,13 @@
   "codeowners": ["@yourgithubusername"],
   "iot_class": "local_push",
   "bluetooth": [
-    { "manufacturer_id": 0 },
-    { "service_uuid": "0000ffff-0000-1000-8000-00805f9b34fb" },
-    { "service_uuid": "0000ff00-0000-1000-8000-00805f9b34fb" }
+    { "local_name": "HC:L110*" },
+    { "local_name": "HC:L112*" },
+    { "local_name": "HC:L113*" },
+    { "local_name": "HC:L114*" },
+    { "local_name": "HC:L115*" },
+    { "local_name": "HC:L120*" },
+    { "local_name": "HC:L122*" }
   ],
   "config_flow": true
 }
