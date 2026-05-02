@@ -1,485 +1,206 @@
-"""Sensor entities for the Hanchu ESS BLE integration."""
-
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Optional
+
 from homeassistant.components.sensor import (
-    SensorDeviceClass,
     SensorEntity,
-    SensorEntityDescription,
+    SensorDeviceClass,
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import (
-    EntityCategory,
-    PERCENTAGE,
-    SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
-    UnitOfElectricCurrent,
-    UnitOfElectricPotential,
-    UnitOfEnergy,
-    UnitOfFrequency,
-    UnitOfPower,
-    UnitOfTemperature,
-)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DEFAULT_POLL_KEYS, DOMAIN
-from .coordinator import HanchuBleCoordinator
-from .entity import HanchuCoordinatorEntity
+from .const import DOMAIN
 
-UNIT_VAR = "var"
-REGISTER_SCALE_FACTORS: dict[str, float] = {
-    "P071": 100.0,
-}
-DISABLED_BY_DEFAULT_KEYS: set[str] = {
-    "P055",
-    "P056",
-    "P057",
-    "P067",
-    "P068",
-    "P075",
-    "P076",
-}
-
-SENSORS: tuple[SensorEntityDescription, ...] = (
-    SensorEntityDescription(
-        key="rssi",
-        translation_key="rssi",
-        icon="mdi:bluetooth",
-        native_unit_of_measurement=SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
-        state_class=SensorStateClass.MEASUREMENT,
-        entity_category=EntityCategory.DIAGNOSTIC,
-    ),
-)
+_LOGGER = logging.getLogger(__name__)
 
 
-def _register_description(
-    key: str,
-    name: str,
-    *,
-    enabled_default: bool = True,
-    **kwargs,
-) -> SensorEntityDescription:
-    """Build a register sensor description with a default enabled state."""
+# ---------------------------------------------------------------------------
+# Sensor description model
+# ---------------------------------------------------------------------------
 
-    return SensorEntityDescription(
-        key=key,
-        name=name,
-        entity_registry_enabled_default=enabled_default,
-        **kwargs,
-    )
+@dataclass
+class HanchuSensorDescription:
+    key: str
+    name: str
+    unit: Optional[str] = None
+    device_class: Optional[str] = None
+    state_class: Optional[str] = None
+    value_fn: Optional[Callable[[Dict[str, Any]], Any]] = None
 
 
-REGISTER_SENSORS: dict[str, SensorEntityDescription] = {
-    "P024": _register_description(
-        key="P024",
+# ---------------------------------------------------------------------------
+# Sensors MUST match keys emitted by protocol.FRIENDLY_MAP
+# ---------------------------------------------------------------------------
+
+SENSOR_MAP: Dict[str, HanchuSensorDescription] = {
+    # PV
+    "pv1_voltage": HanchuSensorDescription(
+        key="pv1_voltage",
         name="PV1 Voltage",
+        unit="V",
         device_class=SensorDeviceClass.VOLTAGE,
-        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
         state_class=SensorStateClass.MEASUREMENT,
     ),
-    "P025": _register_description(
-        key="P025",
+    "pv1_current": HanchuSensorDescription(
+        key="pv1_current",
         name="PV1 Current",
+        unit="A",
         device_class=SensorDeviceClass.CURRENT,
-        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
         state_class=SensorStateClass.MEASUREMENT,
     ),
-    "P026": _register_description(
-        key="P026",
+    "pv2_voltage": HanchuSensorDescription(
+        key="pv2_voltage",
         name="PV2 Voltage",
+        unit="V",
         device_class=SensorDeviceClass.VOLTAGE,
-        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
         state_class=SensorStateClass.MEASUREMENT,
     ),
-    "P027": _register_description(
-        key="P027",
+    "pv2_current": HanchuSensorDescription(
+        key="pv2_current",
         name="PV2 Current",
+        unit="A",
         device_class=SensorDeviceClass.CURRENT,
-        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
         state_class=SensorStateClass.MEASUREMENT,
     ),
-    "P044": _register_description(
-        key="P044",
-        name="L1 Voltage",
+    "pv_power_total": HanchuSensorDescription(
+        key="pv_power_total",
+        name="PV Power Total",
+        unit="W",
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+
+    # Grid
+    "grid_voltage": HanchuSensorDescription(
+        key="grid_voltage",
+        name="Grid Voltage",
+        unit="V",
         device_class=SensorDeviceClass.VOLTAGE,
-        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
         state_class=SensorStateClass.MEASUREMENT,
     ),
-    "P045": _register_description(
-        key="P045",
-        name="L1 Current",
+    "grid_current": HanchuSensorDescription(
+        key="grid_current",
+        name="Grid Current",
+        unit="A",
         device_class=SensorDeviceClass.CURRENT,
-        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
         state_class=SensorStateClass.MEASUREMENT,
     ),
-    "P053": _register_description(
-        key="P053",
+    "grid_frequency": HanchuSensorDescription(
+        key="grid_frequency",
         name="Grid Frequency",
+        unit="Hz",
         device_class=SensorDeviceClass.FREQUENCY,
-        native_unit_of_measurement=UnitOfFrequency.HERTZ,
         state_class=SensorStateClass.MEASUREMENT,
     ),
-    "P055": _register_description(
-        key="P055",
-        name="Active Power",
-        enabled_default=False,
+    "grid_power": HanchuSensorDescription(
+        key="grid_power",
+        name="Grid Active Power",
+        unit="W",
         device_class=SensorDeviceClass.POWER,
-        native_unit_of_measurement=UnitOfPower.WATT,
         state_class=SensorStateClass.MEASUREMENT,
     ),
-    "P056": _register_description(
-        key="P056",
-        name="Reactive Power",
-        enabled_default=False,
-        native_unit_of_measurement=UNIT_VAR,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-    "P057": _register_description(
-        key="P057",
-        name="Power Factor",
-        enabled_default=False,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-    "P060": _register_description(
-        key="P060",
-        name="PV2 Total Power",
+
+    # Load
+    "load_power": HanchuSensorDescription(
+        key="load_power",
+        name="Load Power",
+        unit="W",
         device_class=SensorDeviceClass.POWER,
-        native_unit_of_measurement=UnitOfPower.WATT,
         state_class=SensorStateClass.MEASUREMENT,
     ),
-    "P061": _register_description(
-        key="P061",
-        name="PV Energy Today",
-        device_class=SensorDeviceClass.ENERGY,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        state_class=SensorStateClass.TOTAL_INCREASING,
-    ),
-    "P062": _register_description(
-        key="P062",
-        name="PV Energy Total",
-        device_class=SensorDeviceClass.ENERGY,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        state_class=SensorStateClass.TOTAL_INCREASING,
-    ),
-    "P067": _register_description(
-        key="P067",
-        name="Battery Voltage",
-        enabled_default=False,
-        device_class=SensorDeviceClass.VOLTAGE,
-        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-    "P068": _register_description(
-        key="P068",
-        name="Battery Current",
-        enabled_default=False,
-        device_class=SensorDeviceClass.CURRENT,
-        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-    "P069": _register_description(
-        key="P069",
-        name="Battery Power",
-        device_class=SensorDeviceClass.POWER,
-        native_unit_of_measurement=UnitOfPower.WATT,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-    "P070": _register_description(
-        key="P070",
-        name="Battery Temperature",
-        device_class=SensorDeviceClass.TEMPERATURE,
-        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-    "P071": _register_description(
-        key="P071",
-        name="Battery SoC",
+
+    # Battery
+    "battery_soc": HanchuSensorDescription(
+        key="battery_soc",
+        name="Battery State of Charge",
+        unit="%",
         device_class=SensorDeviceClass.BATTERY,
-        native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda d: round(d.get("battery_soc", 0) * 100, 1)
+        if isinstance(d.get("battery_soc"), (int, float))
+        else d.get("battery_soc"),
     ),
-    "P075": _register_description(
-        key="P075",
-        name="Battery Charge Today",
-        enabled_default=False,
-        device_class=SensorDeviceClass.ENERGY,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        state_class=SensorStateClass.TOTAL_INCREASING,
-    ),
-    "P076": _register_description(
-        key="P076",
-        name="Battery Discharge Today",
-        enabled_default=False,
-        device_class=SensorDeviceClass.ENERGY,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        state_class=SensorStateClass.TOTAL_INCREASING,
-    ),
-    "P079": _register_description(
-        key="P079",
-        name="EPS Voltage",
+    "battery_voltage": HanchuSensorDescription(
+        key="battery_voltage",
+        name="Battery Voltage",
+        unit="V",
         device_class=SensorDeviceClass.VOLTAGE,
-        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
         state_class=SensorStateClass.MEASUREMENT,
     ),
-    "P080": _register_description(
-        key="P080",
-        name="EPS Current",
+    "battery_current": HanchuSensorDescription(
+        key="battery_current",
+        name="Battery Current",
+        unit="A",
         device_class=SensorDeviceClass.CURRENT,
-        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
         state_class=SensorStateClass.MEASUREMENT,
     ),
-    "P081": _register_description(
-        key="P081",
-        name="EPS Frequency",
-        device_class=SensorDeviceClass.FREQUENCY,
-        native_unit_of_measurement=UnitOfFrequency.HERTZ,
+    "battery_temperature": HanchuSensorDescription(
+        key="battery_temperature",
+        name="Battery Temperature",
+        unit="°C",
+        device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
     ),
-    "P082": _register_description(
-        key="P082",
-        name="EPS Active Power",
-        device_class=SensorDeviceClass.POWER,
-        native_unit_of_measurement=UnitOfPower.WATT,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-    "P083": _register_description(
-        key="P083",
-        name="EPS Reactive Power",
-        native_unit_of_measurement=UNIT_VAR,
-        state_class=SensorStateClass.MEASUREMENT,
-    ),
-    "P084": _register_description(
-        key="P084",
-        name="EPS Energy Today",
-        device_class=SensorDeviceClass.ENERGY,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        state_class=SensorStateClass.TOTAL_INCREASING,
-    ),
-    "P085": _register_description(
-        key="P085",
-        name="EPS Energy Total",
-        device_class=SensorDeviceClass.ENERGY,
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        state_class=SensorStateClass.TOTAL_INCREASING,
-    ),
-    "L005": SensorEntityDescription(
-        key="L005",
-        name="Charge Period 1 Start",
-        icon="mdi:clock-start",
-        native_unit_of_measurement=None,
-        device_class=None,
-        state_class=None,
-    ),
-    "L006": SensorEntityDescription(
-        key="L006",
-        name="Charge Period 1 End",
-        icon="mdi:clock-end",
-        native_unit_of_measurement=None,
-        device_class=None,
-        state_class=None,
-    ),
-    "L007": SensorEntityDescription(
-        key="L007",
-        name="Charge Period 2 Start",
-        icon="mdi:clock-start",
-        native_unit_of_measurement=None,
-        device_class=None,
-        state_class=None,
-    ),
-    "L008": SensorEntityDescription(
-        key="L008",
-        name="Charge Period 2 End",
-        icon="mdi:clock-end",
-        native_unit_of_measurement=None,
-        device_class=None,
-        state_class=None,
-    ),
-    "L009": SensorEntityDescription(
-        key="L009",
-        name="Charge Period 3 Start",
-        icon="mdi:clock-start",
-        native_unit_of_measurement=None,
-        device_class=None,
-        state_class=None,
-    ),
-    "L010": SensorEntityDescription(
-        key="L010",
-        name="Charge Period 3 End",
-        icon="mdi:clock-end",
-        native_unit_of_measurement=None,
-        device_class=None,
-        state_class=None,
-    ),
-    "L011": SensorEntityDescription(
-        key="L011",
-        name="Discharge Period 1 Start",
-        icon="mdi:clock-start",
-        native_unit_of_measurement=None,
-        device_class=None,
-        state_class=None,
-    ),
-    "L012": SensorEntityDescription(
-        key="L012",
-        name="Discharge Period 1 End",
-        icon="mdi:clock-end",
-        native_unit_of_measurement=None,
-        device_class=None,
-        state_class=None,
-    ),
-    "L013": SensorEntityDescription(
-        key="L013",
-        name="Discharge Period 2 Start",
-        icon="mdi:clock-start",
-        native_unit_of_measurement=None,
-        device_class=None,
-        state_class=None,
-    ),
-    "L014": SensorEntityDescription(
-        key="L014",
-        name="Discharge Period 2 End",
-        icon="mdi:clock-end",
-        native_unit_of_measurement=None,
-        device_class=None,
-        state_class=None,
-    ),
-    "L015": SensorEntityDescription(
-        key="L015",
-        name="Discharge Period 3 Start",
-        icon="mdi:clock-start",
-        native_unit_of_measurement=None,
-        device_class=None,
-        state_class=None,
-    ),
-    "L016": SensorEntityDescription(
-        key="L016",
-        name="Discharge Period 3 End",
-        icon="mdi:clock-end",
-        native_unit_of_measurement=None,
-        device_class=None,
-        state_class=None,
-    ),
-    "L017": SensorEntityDescription(
-        key="L017",
-        name="Charge Power Limit",
-        icon="mdi:flash",
-        native_unit_of_measurement="W",
-        device_class="power",
-        state_class="measurement",
-    ),
-    "L018": SensorEntityDescription(
-        key="L018",
-        name="Discharge Power Limit",
-        icon="mdi:flash",
-        native_unit_of_measurement="W",
-        device_class="power",
-        state_class="measurement",
-    ),
-    "L019": SensorEntityDescription(
-        key="L019",
-        name="Work Mode (L-code)",
-        icon="mdi:cog",
-        native_unit_of_measurement=None,
-        device_class=None,
-        state_class=None,
+
+    # Work mode
+    "work_mode": HanchuSensorDescription(
+        key="work_mode",
+        name="Work Mode",
     ),
 }
 
+
+# ---------------------------------------------------------------------------
+# Entity setup
+# ---------------------------------------------------------------------------
 
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Hanchu sensors from a config entry."""
-    coordinator: HanchuBleCoordinator = hass.data[DOMAIN][entry.entry_id]
-    entities: list[SensorEntity] = [
-        *(HanchuDiagnosticSensor(coordinator, description) for description in SENSORS),
-        *(
-            HanchuRegisterSensor(
-                coordinator,
-                register_key,
-                REGISTER_SENSORS.get(
-                    register_key,
-                    _register_description(
-                        key=register_key,
-                        name=register_key,
-                        enabled_default=not register_key.startswith("P"),
-                    ),
-                ),
-            )
-            for register_key in DEFAULT_POLL_KEYS
-        ),
+    """Set up Hanchu BLE sensors."""
+    data = hass.data[DOMAIN][entry.entry_id]
+    coordinator = data["coordinator"]
+
+    entities = [
+        HanchuSensor(coordinator, entry, desc)
+        for desc in SENSOR_MAP.values()
     ]
+
     async_add_entities(entities)
 
 
-class HanchuDiagnosticSensor(HanchuCoordinatorEntity, SensorEntity):
-    """Diagnostic BLE sensor."""
+# ---------------------------------------------------------------------------
+# Sensor entity
+# ---------------------------------------------------------------------------
 
-    entity_description: SensorEntityDescription
+class HanchuSensor(CoordinatorEntity, SensorEntity):
+    """Representation of a Hanchu inverter sensor."""
 
-    def __init__(
-        self,
-        coordinator: HanchuBleCoordinator,
-        description: SensorEntityDescription,
-    ) -> None:
-        """Initialise the sensor."""
+    def __init__(self, coordinator, entry, description: HanchuSensorDescription):
         super().__init__(coordinator)
         self.entity_description = description
-        self._attr_unique_id = f"{coordinator.address}_{description.key}"
+        self._attr_name = f"Hanchu {description.name}"
+        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, entry.entry_id)},
+            "name": "Hanchu Inverter",
+            "manufacturer": "Hanchu",
+            "model": "ESS Series",
+        }
 
     @property
     def native_value(self):
-        """Return the sensor's value."""
-        if self.entity_description.key == "rssi":
-            return self.coordinator.data.rssi
+        data = self.coordinator.data or {}
+        desc = self.entity_description
 
-        return None
+        if desc.value_fn:
+            return desc.value_fn(data)
 
-
-class HanchuRegisterSensor(HanchuCoordinatorEntity, SensorEntity):
-    """Raw inverter register sensor."""
-
-    _attr_entity_registry_enabled_default = True
-
-    entity_description: SensorEntityDescription
-
-    def __init__(
-        self,
-        coordinator: HanchuBleCoordinator,
-        register_key: str,
-        description: SensorEntityDescription,
-    ) -> None:
-        """Initialise the sensor."""
-        super().__init__(coordinator)
-        self._register_key = register_key
-        self.entity_description = description
-        self._attr_unique_id = f"{coordinator.address}_{register_key.lower()}"
-        self._attr_entity_registry_enabled_default = (
-            register_key not in DISABLED_BY_DEFAULT_KEYS
-            and not (
-                register_key.startswith("P")
-                and description.name == register_key
-            )
-        )
-
-    @property
-    def native_value(self):
-        """Return the raw register value."""
-        values = self.coordinator.data.values or {}
-        value = values.get(self._register_key)
-        if value is None:
-            return None
-
-        scale_factor = REGISTER_SCALE_FACTORS.get(self._register_key)
-        if scale_factor is not None:
-            if isinstance(value, (int, float)):
-                return value * scale_factor
-            if isinstance(value, str):
-                try:
-                    return float(value) * scale_factor
-                except ValueError:
-                    return value
-
-        return value
+        return data.get(desc.key)
