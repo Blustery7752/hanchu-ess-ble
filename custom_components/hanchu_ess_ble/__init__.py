@@ -1,37 +1,53 @@
-"""The Hanchu ESS BLE integration."""
-
 from __future__ import annotations
 
+import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import DOMAIN, PLATFORMS
-from .coordinator import HanchuBleCoordinator
+from .const import DOMAIN
+from .ble_client import HanchuBleClient
+from .coordinator import HanchuCoordinator
+
+_LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Hanchu ESS BLE from a config entry."""
-    coordinator = HanchuBleCoordinator(hass, entry)
-    await coordinator.async_config_entry_first_refresh()
-    await coordinator.async_setup()
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
+    """Set up Hanchu BLE integration."""
+    address = entry.data["address"]
 
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    entry.async_on_unload(entry.add_update_listener(async_reload_entry))
+    ble_client = HanchuBleClient(hass, entry, address)
+
+    # Coordinator: stores latest telemetry pushed from BLE notifications
+    coordinator = HanchuCoordinator(hass, ble_client)
+
+    # Register callback so BLE client pushes updates into coordinator
+    ble_client.set_notification_callback(coordinator.handle_notification)
+
+    # Connect BLE immediately
+    await ble_client.connect()
+
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN][entry.entry_id] = {
+        "ble_client": ble_client,
+        "coordinator": coordinator,
+    }
+
+    # Forward platforms
+    await hass.config_entries.async_forward_entry_setups(
+        entry, ["sensor", "number", "select"]
+    )
+
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry."""
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if unload_ok:
-        coordinator: HanchuBleCoordinator = hass.data[DOMAIN].pop(entry.entry_id)
-        await coordinator.async_shutdown()
-        if not hass.data[DOMAIN]:
-            hass.data.pop(DOMAIN)
-    return unload_ok
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
+    """Unload Hanchu BLE integration."""
+    data = hass.data[DOMAIN].pop(entry.entry_id)
+    ble_client: HanchuBleClient = data["ble_client"]
 
+    await ble_client.disconnect()
 
-async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload a config entry."""
-    await hass.config_entries.async_reload(entry.entry_id)
+    return await hass.config_entries.async_unload_platforms(
+        entry, ["sensor", "number", "select"]
+    )

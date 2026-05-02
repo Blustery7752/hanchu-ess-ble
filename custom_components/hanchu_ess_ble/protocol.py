@@ -1,265 +1,223 @@
-"""Protocol helpers for Hanchu inverter BLE communication."""
-
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import json
 import logging
-from typing import Any
+import random
+import string
+from typing import Dict, Any, Optional
 
-from Crypto.Cipher import AES
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 _LOGGER = logging.getLogger(__name__)
 
-_READ_MESSAGE_TYPE = 0x03
-_AES_HANDSHAKE_PREFIX = 0x05
-_AES_HANDSHAKE_LENGTH = 6
-_FINAL_PACKET_TYPE = 0
-_FRAME_HEADER_LENGTH = 6
-AES_ACK_PREFIX = b"\x05\x00"
 
+class HanchuProtocol:
+    """AES key exchange, decryption, and telemetry parsing."""
 
-class HanchuProtocolError(ValueError):
-    """Raised when a Hanchu BLE frame is malformed."""
+    # Must match web app
+    BASE_KEY = "gxkj@2099@1914zy"
+    BASE_IV = "9z64Qr8mZH7Pg8d1"
 
+    # P/L/B → friendly names
+    FRIENDLY_MAP = {
+        # PV
+        "P024": "pv1_voltage",
+        "P025": "pv1_current",
+        "P026": "pv2_voltage",
+        "P027": "pv2_current",
+        "P060": "pv_power_total",
+        "P061": "pv_energy_today",
+        "P062": "pv_energy_total",
 
-def _codec_basis() -> bytes:
-    """Return the static protocol basis used for local BLE sessions."""
+        # Grid
+        "P044": "grid_voltage",
+        "P045": "grid_current",
+        "P053": "grid_frequency",
+        "P055": "grid_power",
+        "P056": "grid_reactive_power",
+        "P057": "grid_power_factor",
+        "P638": "grid_import_today",
+        "P639": "grid_export_today",
+        "P500": "grid_power_state",
 
-    segments = (
-        bytes((0x67, 0x78)),
-        bytes((0x6B, 0x6A, 0x40, 0x32)),
-        bytes((0x30, 0x39, 0x39, 0x40)),
-        bytes((0x31, 0x39, 0x31, 0x34)),
-        bytes((0x7A, 0x79)),
-    )
-    return b"".join(segments)
+        # Battery (inverter-side)
+        "P067": "battery_voltage",
+        "P068": "battery_current",
+        "P069": "battery_power",
+        "P070": "battery_temperature",
+        "P071": "battery_soc",  # decimal 0.67 = 67%
+        "P075": "battery_charge_today",
+        "P076": "battery_discharge_today",
 
+        # Load
+        "P644": "load_power",
 
-def _state_vector() -> bytes:
-    """Return the static state vector used by the local BLE codec."""
+        # Identity
+        "P002": "inverter_serial",
+        "P006": "inverter_firmware",
+        "L023": "dtu_firmware",
 
-    values = (
-        0x39,
-        0x7A,
-        0x36,
-        0x34,
-        0x51,
-        0x72,
-        0x38,
-        0x6D,
-        0x5A,
-        0x48,
-        0x37,
-        0x50,
-        0x67,
-        0x38,
-        0x64,
-        0x31,
-    )
-    return bytes(values)
+        # Work mode / SOC limits
+        "P651": "work_mode",
+        "P647": "charge_to_soc",
+        "P648": "discharge_to_soc",
+        "P772": "min_soc_cutoff",
 
+        # Charge/discharge windows
+        "L005": "charge_p1_start",
+        "L006": "charge_p1_end",
+        "L007": "charge_p2_start",
+        "L008": "charge_p2_end",
+        "L009": "charge_p3_start",
+        "L010": "charge_p3_end",
+        "L011": "discharge_p1_start",
+        "L012": "discharge_p1_end",
+        "L013": "discharge_p2_start",
+        "L014": "discharge_p2_end",
+        "L015": "discharge_p3_start",
+        "L016": "discharge_p3_end",
 
-def _hex_preview(payload: bytes, limit: int = 64) -> str:
-    """Return a short hex preview for debug logging."""
-
-    hex_payload = payload.hex()
-    if len(hex_payload) <= limit:
-        return hex_payload
-    return f"{hex_payload[:limit]}..."
-
-
-@dataclass(slots=True)
-class HanchuDataPoint:
-    """A single inverter key/value pair."""
-
-    key: str
-    value: Any = None
-
-
-@dataclass(slots=True)
-class HanchuReply:
-    """Decoded inverter reply payload."""
-
-    tid: str | None
-    act: str | None
-    cmd: str | None
-    code: str | None
-    data: list[HanchuDataPoint] = field(default_factory=list)
-
-    def as_dict(self) -> dict[str, Any]:
-        """Return the data payload as a key/value map."""
-        return {point.key: point.value for point in self.data}
-
-
-def derive_session_key(handshake_token: str) -> str:
-    """Derive the temporary AES key from a six-character handshake token."""
-
-    if len(handshake_token) != _AES_HANDSHAKE_LENGTH:
-        raise HanchuProtocolError("Handshake token must be exactly 6 characters")
-
-    try:
-        start_index = ord(handshake_token[5]) % 10
-        key_chars = list(_codec_basis().decode("utf-8"))
-        for index, char in enumerate(handshake_token):
-            key_chars[start_index + index] = char
-    except IndexError as err:
-        raise HanchuProtocolError("Failed to derive session key from handshake token") from err
-
-    return "".join(key_chars)
-
-
-def build_handshake_command(handshake_token: str) -> bytes:
-    """Build the initial unencrypted AES handshake packet."""
-
-    if len(handshake_token) != _AES_HANDSHAKE_LENGTH:
-        raise HanchuProtocolError("Handshake token must be exactly 6 characters")
-
-    command = bytes([_AES_HANDSHAKE_PREFIX]) + handshake_token.encode("ascii")
-    _LOGGER.debug(
-        "Built Hanchu handshake command token=%s payload=%s",
-        handshake_token,
-        _hex_preview(command),
-    )
-    return command
-
-
-def encrypt_message(payload: bytes, secret_key: str | None = None) -> bytes:
-    """Encrypt a Hanchu payload with AES/CFB8/NoPadding."""
-
-    key = secret_key.encode("utf-8") if secret_key is not None else _codec_basis()
-    cipher = AES.new(key, AES.MODE_CFB, iv=_state_vector(), segment_size=8)
-    encrypted = cipher.encrypt(payload)
-    _LOGGER.debug(
-        "Encrypted Hanchu payload plaintext=%s ciphertext=%s",
-        _hex_preview(payload),
-        _hex_preview(encrypted),
-    )
-    return encrypted
-
-
-def decrypt_message(payload: bytes, secret_key: str | None = None) -> bytes:
-    """Decrypt a Hanchu payload with AES/CFB8/NoPadding."""
-
-    key = secret_key.encode("utf-8") if secret_key is not None else _codec_basis()
-    cipher = AES.new(key, AES.MODE_CFB, iv=_state_vector(), segment_size=8)
-    decrypted = cipher.decrypt(payload)
-    _LOGGER.debug(
-        "Decrypted Hanchu payload ciphertext=%s plaintext=%s",
-        _hex_preview(payload),
-        _hex_preview(decrypted),
-    )
-    return decrypted
-
-
-def build_read_request(keys: list[str], tid: str = "10001") -> bytes:
-    """Build a compact JSON read request for inverter keys."""
-
-    payload = {
-        "act": "1",
-        "cmd": "local",
-        "data": [{"k": key} for key in keys],
-        "tid": tid,
+        # Power limits
+        "L017": "charge_power_limit",
+        "L018": "discharge_power_limit",
+        "L074": "max_soc_limit",
     }
-    encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
-    _LOGGER.debug("Built Hanchu read request tid=%s keys=%s payload=%s", tid, keys, encoded)
-    return encoded
-
-
-def parse_reply_payload(payload: bytes) -> HanchuReply:
-    """Parse a JSON reply payload into a structured object."""
-
-    cleaned_payload = payload.rstrip(b"\x00").decode("utf-8")
-    _LOGGER.debug("Parsing Hanchu reply payload=%s", cleaned_payload)
-    document = json.loads(cleaned_payload)
-    points = [
-        HanchuDataPoint(key=item["k"], value=item.get("v"))
-        for item in document.get("data", [])
-        if "k" in item
-    ]
-    return HanchuReply(
-        tid=document.get("tid"),
-        act=document.get("act"),
-        cmd=document.get("cmd"),
-        code=document.get("code"),
-        data=points,
-    )
-
-
-@dataclass(slots=True)
-class HanchuPacket:
-    """A single framed BLE notification packet."""
-
-    packet_type: int
-    packet_index: int
-    payload_length: int
-    payload: bytes
-
-
-def parse_packet(packet: bytes) -> HanchuPacket | None:
-    """Parse a single notification packet.
-
-    Returns `None` for the short `0500`-style AES acknowledgement frames that the
-    Android app explicitly ignores.
-    """
-
-    if packet.startswith(AES_ACK_PREFIX) and len(packet) <= _FRAME_HEADER_LENGTH:
-        _LOGGER.debug("Ignoring short Hanchu AES ack packet=%s", _hex_preview(packet))
-        return None
-
-    if len(packet) < _FRAME_HEADER_LENGTH:
-        raise HanchuProtocolError("Notification packet is too short")
-
-    if packet[0] != _READ_MESSAGE_TYPE:
-        raise HanchuProtocolError(f"Unsupported notification type 0x{packet[0]:02x}")
-
-    payload_length = int.from_bytes(packet[4:6], byteorder="little")
-    payload = packet[6 : 6 + payload_length]
-    if len(payload) != payload_length:
-        raise HanchuProtocolError("Notification packet payload length mismatch")
-
-    return HanchuPacket(
-        packet_type=packet[1],
-        packet_index=int.from_bytes(packet[2:4], byteorder="little"),
-        payload_length=payload_length,
-        payload=payload,
-    )
-
-
-class HanchuReplyAssembler:
-    """Reassemble one or more BLE reply packets into a decoded response."""
 
     def __init__(self) -> None:
-        """Initialise an empty packet buffer."""
-        self._parts: dict[int, bytes] = {}
+        self._dynamic_key: Optional[bytes] = None
 
-    def reset(self) -> None:
-        """Clear any partially assembled response."""
-        self._parts.clear()
+    # ------------------------------------------------------------------ #
+    # Key exchange (random fix packet)
+    # ------------------------------------------------------------------ #
 
-    def feed(self, packet: bytes) -> HanchuReply | None:
-        """Feed a decrypted notification packet into the assembler."""
+    def build_random_fix_packet(self) -> bytes:
+        """Generate randomFix, derive dynamic key, and build 0x05 packet."""
+        chars = string.ascii_letters + string.digits
+        random_fix = "".join(random.choice(chars) for _ in range(6))
+        _LOGGER.debug("Generated random fix: %s", random_fix)
 
-        parsed = parse_packet(packet)
-        if parsed is None:
+        self._dynamic_key = self._derive_dynamic_key(random_fix)
+
+        fix_bytes = random_fix.encode("utf-8")
+        packet = bytearray(7)
+        packet[0] = 0x05
+        packet[1:1 + 6] = fix_bytes
+        return bytes(packet)
+
+    def _derive_dynamic_key(self, fix: str) -> bytes:
+        """Same logic as JS AESHelper.generateDynamicKey."""
+        if len(fix) != 6:
+            _LOGGER.error("randomFix must be exactly 6 characters")
+            return self.BASE_KEY.encode("utf-8")[:16]
+
+        offset = ord(fix[5]) % 10
+        key_arr = list(self.BASE_KEY)
+        for i in range(6):
+            if offset + i < len(key_arr):
+                key_arr[offset + i] = fix[i]
+        dyn_key_str = "".join(key_arr)
+        _LOGGER.debug("Dynamic key generated (offset=%d)", offset)
+        return dyn_key_str.encode("utf-8")[:16]
+
+    # ------------------------------------------------------------------ #
+    # AES‑CFB8 decryption
+    # ------------------------------------------------------------------ #
+
+    def _decrypt(self, encrypted: bytes) -> Optional[bytes]:
+        """Decrypt encrypted notification using AES‑128‑CFB8."""
+        if not self._dynamic_key:
+            _LOGGER.error("No dynamic key set; random fix packet not sent yet")
             return None
 
-        self._parts[parsed.packet_index] = parsed.payload
-        _LOGGER.debug(
-            "Received Hanchu packet type=%s index=%s payload_length=%s",
-            parsed.packet_type,
-            parsed.packet_index,
-            parsed.payload_length,
-        )
-
-        if parsed.packet_type != _FINAL_PACKET_TYPE:
+        iv = self.BASE_IV.encode("utf-8")[:16]
+        cipher = Cipher(algorithms.AES(self._dynamic_key), modes.CFB8(iv))
+        decryptor = cipher.decryptor()
+        try:
+            return decryptor.update(encrypted) + decryptor.finalize()
+        except Exception as err:
+            _LOGGER.error("AES decrypt error: %s", err)
             return None
+        
+        def encrypt(self, plaintext: bytes) -> Optional[bytes]:
+            """Encrypt JSON write frame using AES‑128‑CFB8."""
+            if not self._dynamic_key:
+                _LOGGER.error("No dynamic key set; random fix packet not sent yet")
+                return None
 
-        merged = b"".join(payload for _, payload in sorted(self._parts.items()))
-        _LOGGER.debug(
-            "Assembled Hanchu reply from %s packet(s): %s",
-            len(self._parts),
-            _hex_preview(merged, limit=128),
-        )
-        self.reset()
-        return parse_reply_payload(merged)
+            iv = self.BASE_IV.encode("utf-8")[:16]
+            cipher = Cipher(algorithms.AES(self._dynamic_key), modes.CFB8(iv))
+            encryptor = cipher.encryptor()
+            try:
+                return encryptor.update(plaintext) + encryptor.finalize()
+            except Exception as err:
+                _LOGGER.error("AES encrypt error: %s", err)
+                return None
+    
+
+    # ------------------------------------------------------------------ #
+    # Public entrypoint: encrypted bytes → friendly telemetry
+    # ------------------------------------------------------------------ #
+
+    def parse_notification(self, encrypted: bytes) -> Dict[str, Any]:
+        """Parse encrypted BLE notification into friendly telemetry dict."""
+        if not encrypted:
+            return {}
+
+        decrypted = self._decrypt(encrypted)
+        if decrypted is None:
+            return {}
+
+        # LOCAL MODE framing
+        if decrypted[0] == 0x03:
+            if len(decrypted) < 6:
+                _LOGGER.warning("LOCAL frame too short")
+                return {}
+            length = decrypted[4] | (decrypted[5] << 8)
+            json_bytes = decrypted[6:6 + length]
+            json_str = json_bytes.decode("utf-8", errors="ignore").strip("\x00").strip()
+        else:
+            # STANDARD MODE
+            json_str = decrypted.decode("utf-8", errors="ignore").strip("\x00").strip()
+
+        if not json_str:
+            _LOGGER.warning("Empty JSON payload")
+            return {}
+
+        try:
+            parsed = json.loads(json_str)
+        except Exception as err:
+            _LOGGER.error("JSON decode error: %s | payload=%r", err, json_str)
+            return {}
+
+        items = parsed.get("data", [])
+        if not isinstance(items, list):
+            return {}
+
+        result: Dict[str, Any] = {}
+
+        for item in items:
+            code = item.get("k")
+            raw_val = item.get("v")
+            if code is None:
+                continue
+
+            val = self._convert_value(raw_val)
+            friendly = self.FRIENDLY_MAP.get(code)
+            if friendly:
+                result[friendly] = val
+
+        return result
+
+    @staticmethod
+    def _convert_value(v: Any) -> Any:
+        """Convert numeric strings to float/int."""
+        if isinstance(v, (int, float)):
+            return v
+        if isinstance(v, str):
+            try:
+                if "." in v:
+                    return float(v)
+                return int(v)
+            except ValueError:
+                return v
+        return v
