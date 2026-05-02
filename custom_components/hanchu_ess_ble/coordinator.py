@@ -10,7 +10,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class HanchuCoordinator(DataUpdateCoordinator):
-    """Coordinator that holds the latest telemetry pushed from BLE."""
+    """Coordinator that stores the latest telemetry pushed from BLE."""
 
     def __init__(self, hass: HomeAssistant, ble_client):
         super().__init__(
@@ -19,8 +19,11 @@ class HanchuCoordinator(DataUpdateCoordinator):
             name="Hanchu BLE Coordinator",
             update_interval=None,  # push-based, no polling
         )
+
         self.ble_client = ble_client
-        self._state: Dict[str, Any] = {}   # <-- renamed from _data
+
+        # IMPORTANT: internal state must NOT be called "data"
+        self._state: Dict[str, Any] = {}
 
     @property
     def data(self) -> Dict[str, Any]:
