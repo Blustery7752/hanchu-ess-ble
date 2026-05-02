@@ -1,4 +1,4 @@
-# Hanchu ESS BLE
+# Hanchu ESS BLE PG
 
 Home Assistant custom integration for Hanchu ESS systems using local Bluetooth Low Energy (BLE).
 
