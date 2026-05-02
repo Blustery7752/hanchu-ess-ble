@@ -12,10 +12,9 @@
   "codeowners": ["@yourgithubusername"],
   "iot_class": "local_push",
   "bluetooth": [
-    {
-      "manufacturer_id": 0,
-      "service_uuid": "0000ffff-0000-1000-8000-00805f9b34fb"
-    }
+    { "manufacturer_id": 0 },
+    { "service_uuid": "0000ffff-0000-1000-8000-00805f9b34fb" },
+    { "service_uuid": "0000ff00-0000-1000-8000-00805f9b34fb" }
   ],
   "config_flow": true
 }
