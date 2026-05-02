@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-DOMAIN = "hanchu_ess_blePG"
+DOMAIN = "hanchu_ess_ble"
 
 # BLE UUIDs (from web app)
 BLE_SERVICE_UUID = "0000ffff-0000-1000-8000-00805f9b34fb"
