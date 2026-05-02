@@ -7,6 +7,7 @@ from typing import Any, Dict
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
 
 from .const import DOMAIN
 
@@ -24,14 +25,15 @@ class HanchuConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
-    async def async_step_user(self, user_input: Dict[str, Any] | None = None) -> FlowResult:
-        """Initial step: ask for BLE MAC address."""
+    async def async_step_user(
+        self, user_input: Dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Manual setup: ask for BLE MAC address."""
         errors: Dict[str, str] = {}
 
         if user_input is not None:
             address = user_input.get("address", "").strip()
 
-            # Validate MAC format
             if not _validate_mac(address):
                 errors["address"] = "invalid_mac"
             else:
@@ -54,4 +56,23 @@ class HanchuConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=schema,
             errors=errors,
+        )
+
+    # ----------------------------------------------------------------------
+    # BLUETOOTH AUTO-DISCOVERY
+    # ----------------------------------------------------------------------
+
+    async def async_step_bluetooth(
+        self, discovery_info: BluetoothServiceInfoBleak
+    ) -> FlowResult:
+        """Handle Bluetooth discovery from Home Assistant."""
+        address = discovery_info.address
+
+        # Prevent duplicates
+        await self.async_set_unique_id(address)
+        self._abort_if_unique_id_configured()
+
+        return self.async_create_entry(
+            title=f"Hanchu ESS ({address})",
+            data={"address": address},
         )
