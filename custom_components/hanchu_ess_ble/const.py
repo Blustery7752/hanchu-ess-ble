@@ -4,13 +4,13 @@ from datetime import timedelta
 
 from homeassistant.const import Platform
 
-DOMAIN = "hanchu_ess_ble"
+DOMAIN = "hanchu_ess_blePG"
 
 CONF_ADDRESS = "address"
 CONF_DEVICE_NAME = "device_name"
 CONF_DISCOVERED_ADDRESS = "discovered_address"
 
-DEFAULT_NAME = "Hanchu ESS"
+DEFAULT_NAME = "Hanchu ESS PG"
 DEFAULT_SCAN_INTERVAL_SECONDS = 30
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
@@ -59,6 +59,21 @@ DEFAULT_POLL_KEYS: tuple[str, ...] = (
     "P084",
     "P085",
     "P139",
+    "L005",
+    "L006",
+    "L007",
+    "L008",
+    "L009",
+    "L010",
+    "L011",
+    "L012",
+    "L013",
+    "L014",
+    "L015",
+    "L016",
+    "L017",
+    "L018",
+    "L019",
     "L034",
 )
 
