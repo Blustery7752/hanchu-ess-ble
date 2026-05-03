@@ -12,9 +12,10 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
+from .entity import HanchuCoordinatorEntity
+from .coordinator import HanchuBleCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ class HanchuSensorDescription:
 
 
 # ---------------------------------------------------------------------------
-# Sensors MUST match keys emitted by protocol.FRIENDLY_MAP
+# Sensors (must match protocol.FRIENDLY_MAP)
 # ---------------------------------------------------------------------------
 
 SENSOR_MAP: Dict[str, HanchuSensorDescription] = {
@@ -164,9 +165,8 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Hanchu BLE sensors."""
     data = hass.data[DOMAIN][entry.entry_id]
-    coordinator = data["coordinator"]
+    coordinator: HanchuBleCoordinator = data["coordinator"]
 
     entities = [
         HanchuSensor(coordinator, entry, desc)
@@ -180,20 +180,15 @@ async def async_setup_entry(
 # Sensor entity
 # ---------------------------------------------------------------------------
 
-class HanchuSensor(CoordinatorEntity, SensorEntity):
+class HanchuSensor(HanchuCoordinatorEntity, SensorEntity):
     """Representation of a Hanchu inverter sensor."""
 
     def __init__(self, coordinator, entry, description: HanchuSensorDescription):
         super().__init__(coordinator)
+
         self.entity_description = description
-        self._attr_name = f"Hanchu {description.name}"
+        self._attr_name = description.name
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, entry.entry_id)},
-            "name": "Hanchu Inverter",
-            "manufacturer": "Hanchu",
-            "model": "ESS Series",
-        }
 
     @property
     def native_value(self):

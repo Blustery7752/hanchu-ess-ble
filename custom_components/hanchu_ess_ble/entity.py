@@ -33,3 +33,4 @@ class HanchuCoordinatorEntity(CoordinatorEntity[HanchuBleCoordinator]):
     def available(self) -> bool:
         """Report availability based on recent BLE activity."""
         return self.coordinator.last_update_success and self.coordinator.data.is_present
+    
