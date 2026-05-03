@@ -1,28 +1,18 @@
 # Hanchu ESS BLE PG
 
-Home Assistant custom integration for Hanchu ESS systems using local Bluetooth Low Energy (BLE).
+Local Bluetooth Low Energy (BLE) integration for **Hanchu ESS inverters**, providing real‑time telemetry and control directly from Home Assistant — no cloud, no Wi‑Fi dongle, no internet required.
 
-This integration connects directly to supported Hanchu inverters over BLE and exposes inverter data as Home Assistant sensors.
+This is a modern, coordinator‑based Home Assistant integration built from the ground up for stability, correctness, and full BLE protocol support.
 
-## Current Status
+---
 
-This project is working, but still early.
+## 🚀 Features
 
-What it can do today:
-- Discover supported Hanchu inverters over Bluetooth
-- Connect locally over BLE
-- Poll a set of inverter registers
-- Expose core battery, PV, grid, EPS, and diagnostic sensors
+### ✔ Local BLE connection  
+Connects directly to the inverter’s onboard Bluetooth module.
 
-What is not implemented yet:
-- Battery device support as separate BLE devices
-- Full register coverage
-- Full scaling/units verification for every sensor
-- Write/configuration commands
-
-## Supported Device Discovery
-
-The integration currently targets inverter advertisements with names starting with:
+### ✔ Automatic Bluetooth discovery  
+Detects supported inverters broadcasting names such as:
 
 - `HC:L110`
 - `HC:L112`
@@ -32,94 +22,156 @@ The integration currently targets inverter advertisements with names starting wi
 - `HC:L120`
 - `HC:L122`
 
-Battery/BMS devices are intentionally not included yet.
+### ✔ Full coordinator architecture  
+- Single BLE connection  
+- Centralised polling  
+- All entities updated atomically  
+- Correct availability handling  
+- Clean device registry integration  
 
-## Installation
+### ✔ Sensor coverage  
+Includes (model‑dependent):
 
-### HACS
+- Battery SoC  
+- Battery temperature  
+- Battery charge/discharge power  
+- PV1 / PV2 voltage & current  
+- PV energy today / total  
+- Grid voltage / current / frequency  
+- EPS voltage / current / frequency  
+- EPS active power  
+- Inverter temperature  
+- BLE RSSI  
+- Many diagnostic registers  
 
-1. Open HACS in Home Assistant
-2. Go to `Integrations`
-3. Open the menu in the top right
-4. Choose `Custom repositories`
-5. Add this repository URL
-6. Select category `Integration`
-7. Install `Hanchu ESS BLE`
-8. Restart Home Assistant
+### ✔ Writable entities  
+Supports inverter configuration via BLE:
+
+- Numeric settings (e.g., SOC limits, charge windows)  
+- Select options (e.g., work mode)  
+
+### ✔ No cloud, no internet  
+Everything is local.
+
+---
+
+## ⚠️ Bluetooth Requirements
+
+### Home Assistant OS users  
+Many mini‑PC onboard Bluetooth chipsets **do not expose DBus advertisement events**, meaning HA’s Bluetooth integration cannot see BLE devices even though the hardware works.
+
+If:
+
+- Bluetooth Visualisation sees the inverter  
+- but  
+- Home Assistant → Settings → Bluetooth shows **no devices**
+
+…then your hardware is not compatible with HAOS’s Bluetooth stack.
+
+### ✔ Recommended solution: **ESP32 Bluetooth Proxy**  
+This integration works flawlessly with an ESP32 proxy.
+
+Supported devices:
+
+- **M5Stack Atom Lite** (recommended)  
+- ESP32‑DevKitC / ESP32‑WROOM boards  
+
+Flash using the official HA firmware:
+
+https://www.home-assistant.io/esp32/
+
+Once added, HA will immediately detect the inverter.
+
+---
+
+## 📦 Installation
+
+### HACS (recommended)
+
+1. Open HACS → Integrations  
+2. Menu → Custom repositories  
+3. Add your repo URL  
+4. Category: **Integration**  
+5. Install  
+6. Restart Home Assistant  
 
 ### Manual
 
-1. Copy `custom_components/hanchu_ess_ble` into your Home Assistant `custom_components` directory
-2. Restart Home Assistant
+1. Copy `custom_components/hanchu_ess_ble` into your HA `custom_components` folder  
+2. Restart Home Assistant  
 
-## Setup
+---
 
-1. Make sure Bluetooth is working on the Home Assistant host
-2. Bring the inverter into BLE range
-3. In Home Assistant, go to `Settings -> Devices & Services`
-4. Add `Hanchu ESS BLE`, or wait for Bluetooth discovery
-5. Select the discovered inverter
-6. Finish setup
+## 🛠 Setup
 
-## Sensors
+1. Ensure Bluetooth is working (or add an ESP32 proxy)  
+2. Bring the inverter into BLE range  
+3. Go to **Settings → Devices & Services**  
+4. Add **Hanchu ESS BLE**  
+5. Select the discovered inverter  
+6. Done  
 
-The integration currently includes a mix of enabled-by-default and disabled-by-default sensors.
+---
 
-Examples of currently exposed sensors:
-- Battery SoC
-- Battery Temperature
-- Battery Power
-- PV1 Voltage / Current
-- PV2 Voltage / Current
-- PV Energy Today / Total
-- Grid Frequency
-- EPS Voltage / Current / Frequency
-- EPS Active Power
-- RSSI
+## 📊 Sensors
 
-Some sensors are disabled by default.
+This integration exposes a wide range of inverter telemetry.  
+Some sensors are enabled by default; others can be enabled manually.
 
-## Notes
+Examples:
 
-- The integration uses local BLE only
-- No cloud account is required
-- Sensor scaling is still being refined as more real-world data is collected
+- Battery SoC  
+- Battery temperature  
+- Battery charge/discharge power  
+- PV1/PV2 voltage & current  
+- PV energy today / total  
+- Grid frequency  
+- EPS voltage / current / frequency  
+- EPS active power  
+- Inverter temperature  
+- BLE RSSI  
 
-## Debug Logging
+Scaling and units are continuously refined based on field data.
 
-If you need to troubleshoot BLE communication, add this to your `configuration.yaml`:
+---
+
+## 🔧 Writable Entities
+
+Depending on inverter model, the integration supports:
+
+- Charge/discharge SOC limits  
+- Charge windows  
+- Work mode selection  
+- Other numeric configuration registers  
+
+These appear as **Number** and **Select** entities.
+
+---
+
+## 🧩 Architecture Overview
+
+This integration uses:
+
+- `ble_client.py` — BLE transport  
+- `protocol.py` — frame parsing & register decoding  
+- `coordinator.py` — centralised polling  
+- `entity.py` — base entity class  
+- `sensor.py` — telemetry sensors  
+- `number.py` — writable numeric settings  
+- `select.py` — mode selectors  
+- `config_flow.py` — UI setup & discovery  
+- `manifest.json` — Bluetooth matchers  
+
+This is a full, modern HA integration — not a prototype.
+
+---
+
+## 🐞 Debug Logging
+
+Add to `configuration.yaml`:
 
 ```yaml
 logger:
   default: info
   logs:
     custom_components.hanchu_ess_ble: debug
-```
-
-This enables detailed logs for:
-- BLE discovery
-- connection and disconnection
-- encrypted handshake
-- request writes
-- notifications
-- packet reassembly
-- parsed inverter replies
-
-## Known Caveats
-
-- Not all values have been added yet
-- Some values may need additional scaling adjustments depending on the device family
-
-## Contributing
-
-Useful contributions include:
-- additional inverter model testing
-- confirmed register meanings
-- confirmed unit/scaling corrections
-- packet captures from supported devices
-- battery/BMS BLE support
-
-## Disclaimer
-
-This is an unofficial community integration and is not affiliated with or endorsed by Hanchu.
-

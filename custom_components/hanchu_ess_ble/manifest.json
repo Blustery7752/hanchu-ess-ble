@@ -1,9 +1,9 @@
 {
   "domain": "hanchu_ess_ble",
-  "name": "Hanchu ESS BLE (Paul’s Fork)",
+  "name": "Hanchu ESS BLE",
   "version": "1.0.0",
-  "documentation": "https://github.com/PaulDGAL/hanchu_ess_ble",
-  "issue_tracker": "https://github.com/PaulDGAL/hanchu_ess_ble/issues",
+  "documentation": "https://github.com/PaulDGAL/hanchu-ess-ble",
+  "issue_tracker": "https://github.com/PaulDGAL/hanchu-ess-ble/issues",
   "requirements": [
     "cryptography>=41.0.0",
     "bleak>=0.21.0"
@@ -12,7 +12,7 @@
   "codeowners": ["@PaulDGAL"],
   "iot_class": "local_push",
   "integration_type": "hub",
-
+  "config_flow": true,
   "bluetooth": [
     { "local_name": "HC:L110*" },
     { "local_name": "HC:L112*" },
