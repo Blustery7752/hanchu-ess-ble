@@ -1,193 +1,219 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Optional
 
-from bleak import BleakClient
+from bleak import BleakClient, BleakError
+from bleak.backends.device import BLEDevice
 
-from .protocol import HanchuProtocol
+from homeassistant.core import HomeAssistant, CALLBACK_TYPE
+from homeassistant.components.bluetooth import async_ble_device_from_address
+
 from .const import (
+    BLE_SERVICE_UUID,
+    BLE_SERVICE_UUID_FALLBACK,
     BLE_NOTIFY_CHAR_UUID,
     BLE_WRITE_CHAR_UUID,
-    WORK_MODE_MAP,
 )
+from .protocol import HanchuProtocol
 
 _LOGGER = logging.getLogger(__name__)
 
+NotificationCallback = Callable[[dict[str, Any]], None]
+
 
 class HanchuBleClient:
-    """Handles BLE connection, AES handshake, notifications, and write commands."""
+    """BLE client for Hanchu ESS inverter."""
 
-    def __init__(self, hass, entry, address: str):
-        self.hass = hass
-        self.entry = entry
-        self.address = address
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        address: str,
+        name: str,
+        notification_callback: NotificationCallback,
+    ) -> None:
+        self._hass = hass
+        self._address = address
+        self._name = name
+        self._notification_callback = notification_callback
 
         self._client: Optional[BleakClient] = None
         self._protocol = HanchuProtocol()
-        self._notify_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+        self._notify_char: Optional[str] = None
+        self._write_char: Optional[str] = None
 
+        self._disconnect_callbacks: list[CALLBACK_TYPE] = []
         self._lock = asyncio.Lock()
 
-    # ------------------------------------------------------------------ #
-    # Connection handling
-    # ------------------------------------------------------------------ #
+    @property
+    def address(self) -> str:
+        return self._address
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def register_disconnect_callback(self, callback: CALLBACK_TYPE) -> None:
+        self._disconnect_callbacks.append(callback)
+
+    async def _resolve_ble_device(self) -> BLEDevice:
+        """Resolve BLEDevice via HA Bluetooth (supports ESPHome proxies)."""
+        ble_device = async_ble_device_from_address(
+            self._hass,
+            self._address,
+            connectable=True,
+        )
+        if not ble_device:
+            raise BleakError(
+                f"BLE device {self._address} not found via Home Assistant Bluetooth stack"
+            )
+        return ble_device
 
     async def connect(self) -> None:
-        """Ensure BLE connection is established and AES key exchange done."""
-        if self._client and self._client.is_connected:
-            return
+        """Connect to the inverter via HA Bluetooth backend."""
+        async with self._lock:
+            if self._client and self._client.is_connected:
+                return
 
-        _LOGGER.info("Connecting to Hanchu inverter at %s", self.address)
-        self._client = BleakClient(self.address)
+            ble_device = await self._resolve_ble_device()
 
-        try:
-            await self._client.connect()
-            _LOGGER.info("Connected to Hanchu inverter")
+            _LOGGER.debug("Connecting to Hanchu inverter at %s (%s)", self._address, self._name)
 
-            # Subscribe to notifications
-            await self._client.start_notify(
-                BLE_NOTIFY_CHAR_UUID,
-                self._handle_notification,
-            )
+            self._client = BleakClient(ble_device)
 
-            # Send random-fix packet to establish dynamic AES key
-            random_fix_packet = self._protocol.build_random_fix_packet()
-            await self._client.write_gatt_char(
-                BLE_WRITE_CHAR_UUID,
-                random_fix_packet,
-                response=True,
-            )
-            _LOGGER.debug("Sent random fix packet")
+            try:
+                await self._client.connect()
+            except BleakError as err:
+                _LOGGER.error("Failed to connect to %s: %s", self._address, err)
+                self._client = None
+                raise
 
-        except Exception as err:
-            _LOGGER.error("BLE connection failed: %s", err)
-            raise
+            self._client.set_disconnected_callback(self._handle_disconnect)
+
+            await self._discover_characteristics()
+            await self._start_notifications()
+            await self._send_handshake()
 
     async def disconnect(self) -> None:
-        """Disconnect BLE client."""
-        if self._client and self._client.is_connected:
-            await self._client.disconnect()
-            _LOGGER.info("Disconnected from Hanchu inverter")
-
-    # ------------------------------------------------------------------ #
-    # Notification handling
-    # ------------------------------------------------------------------ #
-
-    def set_notification_callback(self, callback: Callable[[Dict[str, Any]], None]):
-        """Set callback to receive parsed telemetry."""
-        self._notify_callback = callback
-
-    def _handle_notification(self, sender: int, data: bytearray):
-        """Raw BLE notification → decrypted JSON → friendly telemetry → callback."""
-        try:
-            parsed = self._protocol.parse_notification(bytes(data))
-            if parsed and self._notify_callback:
-                self._notify_callback(parsed)
-        except Exception as err:
-            _LOGGER.error("Failed to handle notification: %s", err)
-
-    # ------------------------------------------------------------------ #
-    # Low-level write
-    # ------------------------------------------------------------------ #
-
-    async def _write(self, frame: bytes) -> None:
-        """Write a raw encrypted frame to the inverter."""
+        """Disconnect from the inverter."""
         async with self._lock:
-            await self.connect()
-            _LOGGER.debug("Writing encrypted frame: %s", frame.hex())
-            await self._client.write_gatt_char(
-                BLE_WRITE_CHAR_UUID,
-                frame,
-                response=True,
-            )
+            if self._client and self._client.is_connected:
+                _LOGGER.debug("Disconnecting from Hanchu inverter at %s", self._address)
+                try:
+                    await self._client.disconnect()
+                except BleakError as err:
+                    _LOGGER.warning("Error during disconnect from %s: %s", self._address, err)
+            self._client = None
 
-    # ------------------------------------------------------------------ #
-    # JSON write frame builder
-    # ------------------------------------------------------------------ #
+    def _handle_disconnect(self, _client: BleakClient) -> None:
+        _LOGGER.warning("Hanchu inverter at %s disconnected", self._address)
+        for cb in list(self._disconnect_callbacks):
+            cb()
 
-    def _build_write_frame(self, code: str, value: Any) -> bytes:
-        """Build a JSON write frame and encrypt it."""
-        payload = {
-            "tid": "10001",
-            "act": "2",  # write
-            "data": [{"k": code, "v": value}],
-        }
+    async def _discover_characteristics(self) -> None:
+        """Discover service and characteristic UUIDs."""
+        assert self._client is not None
 
-        json_str = json.dumps(payload, separators=(",", ":"))
-        json_bytes = json_str.encode("utf-8")
+        services = await self._client.get_services()
 
-        encrypted = self._protocol.encrypt(json_bytes)
-        if encrypted is None:
-            raise RuntimeError("AES encryption failed")
+        service = services.get_service(BLE_SERVICE_UUID) or services.get_service(
+            BLE_SERVICE_UUID_FALLBACK
+        )
+        if not service:
+            raise BleakError("Hanchu BLE service not found on device")
 
-        return encrypted
+        notify_char = service.get_characteristic(BLE_NOTIFY_CHAR_UUID)
+        write_char = service.get_characteristic(BLE_WRITE_CHAR_UUID)
 
-    async def _write_param(self, code: str, value: Any) -> None:
-        """Encrypt and send a write frame."""
-        frame = self._build_write_frame(code, value)
-        await self._write(frame)
+        if not notify_char or not write_char:
+            raise BleakError("Notify or write characteristic not found on Hanchu service")
 
-    # ------------------------------------------------------------------ #
-    # High-level write operations
-    # ------------------------------------------------------------------ #
+        self._notify_char = notify_char.uuid
+        self._write_char = write_char.uuid
+
+        _LOGGER.debug(
+            "Using notify char %s and write char %s for %s",
+            self._notify_char,
+            self._write_char,
+            self._address,
+        )
+
+    async def _start_notifications(self) -> None:
+        """Subscribe to notifications from the inverter."""
+        assert self._client is not None
+        assert self._notify_char is not None
+
+        await self._client.start_notify(self._notify_char, self._notification_handler)
+
+    async def _send_handshake(self) -> None:
+        """Perform dynamic AES key handshake."""
+        assert self._client is not None
+        assert self._write_char is not None
+
+        random_fix = self._protocol.build_random_fix()
+        _LOGGER.debug("Sending randomFix handshake to %s", self._address)
+        await self._client.write_gatt_char(self._write_char, random_fix, response=True)
+
+    def _notification_handler(self, _handle: int, data: bytearray) -> None:
+        """Handle raw BLE notifications."""
+        try:
+            telemetry = self._protocol.parse_notification(bytes(data))
+        except Exception as err:
+            _LOGGER.warning("Failed to parse notification from %s: %s", self._address, err)
+            return
+
+        if telemetry:
+            self._notification_callback(telemetry)
+
+    async def _write_command(self, payload: bytes) -> None:
+        """Write an encrypted command to the inverter."""
+        assert self._client is not None
+        assert self._write_char is not None
+
+        encrypted = self._protocol.encrypt_command(payload)
+        await self._client.write_gatt_char(self._write_char, encrypted, response=True)
+
+    # ---------------------------------------------------------------------
+    # Public high‑level API used by entities
+    # ---------------------------------------------------------------------
 
     async def async_set_work_mode(self, mode: str) -> None:
-        """Set inverter work mode (P651)."""
-        value = WORK_MODE_MAP[mode]
-        await self._write_param("P651", value)
+        payload = self._protocol.build_set_work_mode(mode)
+        await self._write_command(payload)
 
     async def async_set_charge_power_limit(self, watts: int) -> None:
-        await self._write_param("L017", watts)
+        payload = self._protocol.build_set_charge_power_limit(watts)
+        await self._write_command(payload)
 
     async def async_set_discharge_power_limit(self, watts: int) -> None:
-        await self._write_param("L018", watts)
+        payload = self._protocol.build_set_discharge_power_limit(watts)
+        await self._write_command(payload)
 
-    async def async_set_max_soc(self, percent: int) -> None:
-        await self._write_param("L074", percent)
+    async def async_set_max_soc(self, soc: int) -> None:
+        payload = self._protocol.build_set_max_soc(soc)
+        await self._write_command(payload)
 
-    async def async_set_charge_to_soc(self, percent: int) -> None:
-        await self._write_param("P647", percent)
+    async def async_set_charge_to_soc(self, soc: int) -> None:
+        payload = self._protocol.build_set_charge_to_soc(soc)
+        await self._write_command(payload)
 
-    async def async_set_discharge_to_soc(self, percent: int) -> None:
-        await self._write_param("P648", percent)
+    async def async_set_discharge_to_soc(self, soc: int) -> None:
+        payload = self._protocol.build_set_discharge_to_soc(soc)
+        await self._write_command(payload)
 
-    async def async_set_min_soc(self, percent: int) -> None:
-        await self._write_param("P772", percent)
-
-    async def async_set_meter_type(self, code: int) -> None:
-        await self._write_param("L034", code)
+    async def async_set_min_soc(self, soc: int) -> None:
+        payload = self._protocol.build_set_min_soc(soc)
+        await self._write_command(payload)
 
     async def async_set_battery_preheat_auto(self, flag: int) -> None:
-        await self._write_param("L108", flag)
+        payload = self._protocol.build_set_battery_preheat_auto(flag)
+        await self._write_command(payload)
 
     async def async_set_battery_preheat_manual(self, flag: int) -> None:
-        await self._write_param("L114", flag)
+        payload = self._protocol.build_set_battery_preheat_manual(flag)
+        await self._write_command(payload)
 
-    # ------------------------------------------------------------------ #
-    # Charge/discharge window setters (optional)
-    # ------------------------------------------------------------------ #
-
-    async def async_set_charge_window(self, window: str, start: int, end: int) -> None:
-        """Set a charge window (seconds after midnight)."""
-        mapping = {
-            "period_1": ("L005", "L006"),
-            "period_2": ("L007", "L008"),
-            "period_3": ("L009", "L010"),
-        }
-        start_code, end_code = mapping[window]
-        await self._write_param(start_code, start)
-        await self._write_param(end_code, end)
-
-    async def async_set_discharge_window(self, window: str, start: int, end: int) -> None:
-        """Set a discharge window (seconds after midnight)."""
-        mapping = {
-            "period_1": ("L011", "L012"),
-            "period_2": ("L013", "L014"),
-            "period_3": ("L015", "L016"),
-        }
-        start_code, end_code = mapping[window]
-        await self._write_param(start_code, start)
-        await self._write_param(end_code, end)
+    async def async_set_meter_type(self, meter_type: int) -> None:
+        payload = self._protocol.build_set_meter_type(meter_type)
+        await self._write_command(payload)
