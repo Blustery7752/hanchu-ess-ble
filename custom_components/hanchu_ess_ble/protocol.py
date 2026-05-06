@@ -12,13 +12,11 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class HanchuProtocol:
-    """AES key exchange, decryption, and telemetry parsing."""
+    """AES key exchange, decryption, telemetry parsing, and write command builder."""
 
-    # Must match web app
     BASE_KEY = "gxkj@2099@1914zy"
     BASE_IV = "9z64Qr8mZH7Pg8d1"
 
-    # P/L/B → friendly names
     FRIENDLY_MAP = {
         # PV
         "P024": "pv1_voltage",
@@ -40,12 +38,12 @@ class HanchuProtocol:
         "P639": "grid_export_today",
         "P500": "grid_power_state",
 
-        # Battery (inverter-side)
+        # Battery
         "P067": "battery_voltage",
         "P068": "battery_current",
         "P069": "battery_power",
         "P070": "battery_temperature",
-        "P071": "battery_soc",  # decimal 0.67 = 67%
+        "P071": "battery_soc",
         "P075": "battery_charge_today",
         "P076": "battery_discharge_today",
 
@@ -57,7 +55,7 @@ class HanchuProtocol:
         "P006": "inverter_firmware",
         "L023": "dtu_firmware",
 
-        # Work mode / SOC limits
+        # Work mode / SOC
         "P651": "work_mode",
         "P647": "charge_to_soc",
         "P648": "discharge_to_soc",
@@ -87,10 +85,10 @@ class HanchuProtocol:
         self._dynamic_key: Optional[bytes] = None
 
     # ------------------------------------------------------------------ #
-    # Key exchange (random fix packet)
+    # Key exchange (renamed for ble_client.py)
     # ------------------------------------------------------------------ #
 
-    def build_random_fix_packet(self) -> bytes:
+    def build_random_fix(self) -> bytes:
         """Generate randomFix, derive dynamic key, and build 0x05 packet."""
         chars = string.ascii_letters + string.digits
         random_fix = "".join(random.choice(chars) for _ in range(6))
@@ -98,14 +96,13 @@ class HanchuProtocol:
 
         self._dynamic_key = self._derive_dynamic_key(random_fix)
 
-        fix_bytes = random_fix.encode("utf-8")
         packet = bytearray(7)
         packet[0] = 0x05
-        packet[1:1 + 6] = fix_bytes
+        packet[1:7] = random_fix.encode("utf-8")
         return bytes(packet)
 
     def _derive_dynamic_key(self, fix: str) -> bytes:
-        """Same logic as JS AESHelper.generateDynamicKey."""
+        """Original Hanchu dynamic key algorithm (unchanged)."""
         if len(fix) != 6:
             _LOGGER.error("randomFix must be exactly 6 characters")
             return self.BASE_KEY.encode("utf-8")[:16]
@@ -115,16 +112,16 @@ class HanchuProtocol:
         for i in range(6):
             if offset + i < len(key_arr):
                 key_arr[offset + i] = fix[i]
-        dyn_key_str = "".join(key_arr)
+
+        dyn_key = "".join(key_arr).encode("utf-8")[:16]
         _LOGGER.debug("Dynamic key generated (offset=%d)", offset)
-        return dyn_key_str.encode("utf-8")[:16]
+        return dyn_key
 
     # ------------------------------------------------------------------ #
-    # AES‑CFB8 decryption
+    # AES‑CFB8 decrypt / encrypt
     # ------------------------------------------------------------------ #
 
     def _decrypt(self, encrypted: bytes) -> Optional[bytes]:
-        """Decrypt encrypted notification using AES‑128‑CFB8."""
         if not self._dynamic_key:
             _LOGGER.error("No dynamic key set; random fix packet not sent yet")
             return None
@@ -132,34 +129,28 @@ class HanchuProtocol:
         iv = self.BASE_IV.encode("utf-8")[:16]
         cipher = Cipher(algorithms.AES(self._dynamic_key), modes.CFB8(iv))
         decryptor = cipher.decryptor()
+
         try:
             return decryptor.update(encrypted) + decryptor.finalize()
         except Exception as err:
             _LOGGER.error("AES decrypt error: %s", err)
             return None
-        
-        def encrypt(self, plaintext: bytes) -> Optional[bytes]:
-            """Encrypt JSON write frame using AES‑128‑CFB8."""
-            if not self._dynamic_key:
-                _LOGGER.error("No dynamic key set; random fix packet not sent yet")
-                return None
 
-            iv = self.BASE_IV.encode("utf-8")[:16]
-            cipher = Cipher(algorithms.AES(self._dynamic_key), modes.CFB8(iv))
-            encryptor = cipher.encryptor()
-            try:
-                return encryptor.update(plaintext) + encryptor.finalize()
-            except Exception as err:
-                _LOGGER.error("AES encrypt error: %s", err)
-                return None
-    
+    def encrypt_command(self, plaintext: bytes) -> bytes:
+        """Encrypt JSON write frame using AES‑128‑CFB8."""
+        if not self._dynamic_key:
+            raise RuntimeError("No dynamic key set; random fix packet not sent yet")
+
+        iv = self.BASE_IV.encode("utf-8")[:16]
+        cipher = Cipher(algorithms.AES(self._dynamic_key), modes.CFB8(iv))
+        encryptor = cipher.encryptor()
+        return encryptor.update(plaintext) + encryptor.finalize()
 
     # ------------------------------------------------------------------ #
-    # Public entrypoint: encrypted bytes → friendly telemetry
+    # Notification parsing
     # ------------------------------------------------------------------ #
 
     def parse_notification(self, encrypted: bytes) -> Dict[str, Any]:
-        """Parse encrypted BLE notification into friendly telemetry dict."""
         if not encrypted:
             return {}
 
@@ -167,7 +158,7 @@ class HanchuProtocol:
         if decrypted is None:
             return {}
 
-        # LOCAL MODE framing
+        # LOCAL MODE
         if decrypted[0] == 0x03:
             if len(decrypted) < 6:
                 _LOGGER.warning("LOCAL frame too short")
@@ -180,7 +171,6 @@ class HanchuProtocol:
             json_str = decrypted.decode("utf-8", errors="ignore").strip("\x00").strip()
 
         if not json_str:
-            _LOGGER.warning("Empty JSON payload")
             return {}
 
         try:
@@ -194,30 +184,71 @@ class HanchuProtocol:
             return {}
 
         result: Dict[str, Any] = {}
-
         for item in items:
             code = item.get("k")
             raw_val = item.get("v")
             if code is None:
                 continue
 
-            val = self._convert_value(raw_val)
             friendly = self.FRIENDLY_MAP.get(code)
             if friendly:
-                result[friendly] = val
+                result[friendly] = self._convert_value(raw_val)
 
         return result
 
+    # ------------------------------------------------------------------ #
+    # Write command builders (required by ble_client.py)
+    # ------------------------------------------------------------------ #
+
+    def _build_json_command(self, code: str, value: Any) -> bytes:
+        payload = {
+            "tid": "10001",
+            "act": "2",
+            "data": [{"k": code, "v": value}],
+        }
+        return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+    def build_set_work_mode(self, mode: str) -> bytes:
+        return self._build_json_command("P651", mode)
+
+    def build_set_charge_power_limit(self, watts: int) -> bytes:
+        return self._build_json_command("L017", watts)
+
+    def build_set_discharge_power_limit(self, watts: int) -> bytes:
+        return self._build_json_command("L018", watts)
+
+    def build_set_max_soc(self, soc: int) -> bytes:
+        return self._build_json_command("L074", soc)
+
+    def build_set_charge_to_soc(self, soc: int) -> bytes:
+        return self._build_json_command("P647", soc)
+
+    def build_set_discharge_to_soc(self, soc: int) -> bytes:
+        return self._build_json_command("P648", soc)
+
+    def build_set_min_soc(self, soc: int) -> bytes:
+        return self._build_json_command("P772", soc)
+
+    def build_set_battery_preheat_auto(self, flag: int) -> bytes:
+        return self._build_json_command("L108", flag)
+
+    def build_set_battery_preheat_manual(self, flag: int) -> bytes:
+        return self._build_json_command("L114", flag)
+
+    def build_set_meter_type(self, meter_type: int) -> bytes:
+        return self._build_json_command("L034", meter_type)
+
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+
     @staticmethod
     def _convert_value(v: Any) -> Any:
-        """Convert numeric strings to float/int."""
         if isinstance(v, (int, float)):
             return v
         if isinstance(v, str):
             try:
-                if "." in v:
-                    return float(v)
-                return int(v)
+                return float(v) if "." in v else int(v)
             except ValueError:
                 return v
         return v

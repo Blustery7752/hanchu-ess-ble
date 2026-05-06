@@ -189,6 +189,7 @@ class HanchuSensor(HanchuCoordinatorEntity, SensorEntity):
         self.entity_description = description
         self._attr_name = description.name
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        self._attr_has_entity_name = True
 
     @property
     def native_value(self):
