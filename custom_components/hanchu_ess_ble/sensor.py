@@ -199,4 +199,6 @@ class HanchuSensor(HanchuCoordinatorEntity, SensorEntity):
         if desc.value_fn:
             return desc.value_fn(data)
 
-        return data.get(desc.key)
+        value = data.get(desc.key)
+        return value if isinstance(value, (int, float)) else None
+

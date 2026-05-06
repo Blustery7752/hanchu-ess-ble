@@ -15,26 +15,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Set up Hanchu ESS BLE integration."""
     address = entry.data["address"]
 
-    # Create BLE client
-    ble_client = HanchuBleClient(hass, entry, address)
+    # 1. Create BLE client first (constructor requires callback)
+    #    Use a temporary no-op callback; we replace it after coordinator exists.
+    ble_client = HanchuBleClient(
+        hass,
+        entry,
+        address,
+        lambda *_: None,   # temporary placeholder
+    )
 
-    # Create coordinator (push-based)
+    # 2. Create coordinator WITH the BLE client
     coordinator = HanchuBleCoordinator(hass, ble_client)
 
-    # BLE notifications feed into coordinator
+    # 3. Now that coordinator exists, set the real callback
     ble_client.set_notification_callback(coordinator.handle_notification)
 
-    # Connect BLE immediately
+    # 4. Connect BLE
     await ble_client.connect()
 
-    # Store objects
+    # 5. Store objects
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = {
         "ble_client": ble_client,
         "coordinator": coordinator,
     }
 
-    # Forward platforms
+    # 6. Forward platforms
     await hass.config_entries.async_forward_entry_setups(
         entry, ["sensor", "number", "select"]
     )

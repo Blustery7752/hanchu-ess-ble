@@ -2,6 +2,9 @@ from __future__ import annotations
 
 DOMAIN = "hanchu_ess_ble"
 
+MANUFACTURER = "Hanchu"
+MODEL = "H1 Series Hybrid Inverter"
+
 # BLE UUIDs (from web app)
 BLE_SERVICE_UUID = "0000ffff-0000-1000-8000-00805f9b34fb"
 BLE_SERVICE_UUID_FALLBACK = "0000ff00-0000-1000-8000-00805f9b34fb"
